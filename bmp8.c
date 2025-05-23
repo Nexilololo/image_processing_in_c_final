@@ -194,3 +194,43 @@ void bmp8_applyFilter(t_bmp8 *img, float **kernel, int kernelSize) {
     }
     free(temp_data);
 }
+
+// Prototypes from Part 3 that belong in bmp8.c
+unsigned int *bmp8_computeHistogram(t_bmp8 *img) {
+    if (!img || !img->data) return NULL;
+
+    unsigned int *hist = (unsigned int *)calloc(256, sizeof(unsigned int));
+    if (!hist) {
+        perror("Failed to allocate memory for histogram");
+        return NULL;
+    }
+
+    for (unsigned int i = 0; i < img->dataSize; ++i) {
+        hist[img->data[i]]++;
+    }
+    return hist;
+}
+
+unsigned int *bmp8_computeCDF(unsigned int *hist) {
+    if (!hist) return NULL;
+
+    unsigned int *cdf = (unsigned int *)calloc(256, sizeof(unsigned int));
+    if (!cdf) {
+        perror("Failed to allocate memory for CDF");
+        return NULL;
+    }
+
+    cdf[0] = hist[0];
+    for (int i = 1; i < 256; ++i) {
+        cdf[i] = cdf[i - 1] + hist[i];
+    }
+    return cdf;
+}
+
+void bmp8_equalize(t_bmp8 *img, unsigned int *hist_eq_map) {
+    if (!img || !img->data || !hist_eq_map) return;
+
+    for (unsigned int i = 0; i < img->dataSize; ++i) {
+        img->data[i] = (unsigned char)hist_eq_map[img->data[i]];
+    }
+}
