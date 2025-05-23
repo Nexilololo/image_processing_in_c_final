@@ -1,0 +1,31 @@
+# CMake generated files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile # If CMake generates it in the source dir (though out-of-source builds are better)
+install_manifest.txt
+
+# Build directories (common names)
+build/
+cmake-build-*/
+out/
+bin/
+lib/
+
+# Compiled object files and binaries
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dylib
+*.dll
+*.exe
+*.out
+
+# IDE specific files (examples)
+.idea/
+.vscode/ # Be selective; some files like launch.json might be useful to commit
+*.suo
+*.user
+*.VC.db
