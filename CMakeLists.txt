@@ -6,4 +6,6 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 
 add_executable(image_processing_in_c_final main.c
         bmp24.h
-        bmp8.h)
+        bmp8.h
+        bmp8.c
+        bmp24.c)
