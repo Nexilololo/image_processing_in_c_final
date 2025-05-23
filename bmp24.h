@@ -68,10 +68,10 @@ void bmp24_saveImage(t_bmp24 *img, const char *filename);
 void file_rawRead(uint32_t position, void *buffer, uint32_t size, size_t n, FILE *file);
 void file_rawWrite(uint32_t position, void *buffer, uint32_t size, size_t n, FILE *file);
 
-void bmp24_readPixelValue(t_bmp24 *image, int x, int y, FILE *file);
+void bmp24_readPixelValue(const t_bmp24 *image, int x, int y, const FILE *file);
 void bmp24_readPixelData(t_bmp24 *image, FILE *file);
 
-void bmp24_writePixelValue(t_bmp24 *image, int x, int y, FILE *file);
+void bmp24_writePixelValue(const t_bmp24 *image, int x, int y, const FILE *file);
 void bmp24_writePixelData(t_bmp24 *image, FILE *file);
 
 void bmp24_negative(t_bmp24 *img);
