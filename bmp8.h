@@ -27,7 +27,7 @@ void bmp8_threshold(t_bmp8 *img, int threshold);
 void bmp8_applyFilter(t_bmp8 *img, float **kernel, int kernelSize);
 
 unsigned int * bmp8_computeHistogram(t_bmp8 * img);
-unsigned int * bmp8_computeCDF(unsigned int * hist);
-void bmp8_equalize(t_bmp8 * img, unsigned int * hist_eq);
+unsigned int * bmp8_computeCDF(const unsigned int * hist);
+void bmp8_equalize(t_bmp8 * img, const unsigned int * hist_eq);
 
 #endif // BMP8_H

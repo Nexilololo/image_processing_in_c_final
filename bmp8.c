@@ -211,7 +211,7 @@ unsigned int *bmp8_computeHistogram(t_bmp8 *img) {
     return hist;
 }
 
-unsigned int *bmp8_computeCDF(unsigned int *hist) {
+unsigned int *bmp8_computeCDF(const unsigned int *hist) {
     if (!hist) return NULL;
 
     unsigned int *cdf = (unsigned int *)calloc(256, sizeof(unsigned int));
@@ -227,7 +227,7 @@ unsigned int *bmp8_computeCDF(unsigned int *hist) {
     return cdf;
 }
 
-void bmp8_equalize(t_bmp8 *img, unsigned int *hist_eq_map) {
+void bmp8_equalize(t_bmp8 *img, const unsigned int *hist_eq_map) {
     if (!img || !img->data || !hist_eq_map) return;
 
     for (unsigned int i = 0; i < img->dataSize; ++i) {
