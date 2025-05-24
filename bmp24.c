@@ -387,3 +387,146 @@ void bmp24_sharpen(t_bmp24 *img) {
     };
     apply_filter_generic(img, k, 3);
 }
+
+
+// --- Histogram Equalization ---
+typedef struct { float y, u, v; } t_yuv_float;
+
+void bmp24_equalize(t_bmp24 *img) {
+    if (!img || !img->data) return;
+
+    t_yuv_float **yuv_data = (t_yuv_float **)malloc(img->height * sizeof(t_yuv_float *));
+    if (!yuv_data) return;
+    for(int i=0; i<img->height; ++i) {
+        yuv_data[i] = (t_yuv_float *)malloc(img->width * sizeof(t_yuv_float));
+        if(!yuv_data[i]) {
+            for(int k=0; k<i; ++k) free(yuv_data[k]);
+            free(yuv_data);
+            return;
+        }
+    }
+
+    unsigned int y_histogram[256] = {0};
+
+    for (int r = 0; r < img->height; ++r) {
+        for (int c = 0; c < img->width; ++c) {
+            float R = img->data[r][c].red;
+            float G = img->data[r][c].green;
+            float B = img->data[r][c].blue;
+
+            yuv_data[r][c].y = 0.299f * R + 0.587f * G + 0.114f * B;
+            yuv_data[r][c].u = -0.14713f * R - 0.28886f * G + 0.436f * B;
+            yuv_data[r][c].v = 0.615f * R - 0.51499f * G - 0.10001f * B;
+
+            uint8_t y_int = (uint8_t)roundf(yuv_data[r][c].y);
+            if (y_int > 255) y_int = 255; // Should not happen if R,G,B are 0-255
+            if (y_int < 0) y_int = 0;     // Should not happen
+            y_histogram[y_int]++;
+        }
+    }
+
+    unsigned int y_cdf[256] = {0};
+    y_cdf[0] = y_histogram[0];
+    for (int i = 1; i < 256; ++i) {
+        y_cdf[i] = y_cdf[i - 1] + y_histogram[i];
+    }
+
+    unsigned int cdf_min = 0;
+    for (int i = 0; i < 256; ++i) {
+        if (y_cdf[i] > 0) {
+            cdf_min = y_cdf[i]; // Smallest non-zero CDF value (actually, smallest hist value for cdf_min in formula)
+                                // The PDF formula uses cdf_min from the CDF array.
+                                // Let's find the first non-zero cdf value.
+            break;
+        }
+    }
+    // The PDF formula for hist_eq[i] uses cdf_min as the smallest non-zero value of the *cumulative* histogram.
+    // If all pixels are black, cdf_min could be 0 if we take hist[0].
+    // Let's find the first cdf[k] > 0.
+    // If hist[0] is the only non-zero, cdf_min = hist[0].
+    // The formula is (cdf[i] - cdf_min) / (N - cdf_min) * 255
+    // N = total pixels = img->width * img->height
+    // cdf_min should be the cdf value of the first gray level that has pixels.
+    // If gray level 0 has pixels, cdf_min = cdf[0] = hist[0].
+    // If gray level g is the first with pixels, cdf_min = cdf[g] = hist[g].
+    // The PDF example for 8-bit shows hist_eq[52] = 0, where 52 is the first gray level.
+    // So cdf_min is cdf[first_gray_level_with_pixels].
+
+    int first_gray_level = -1;
+    for(int i=0; i<256; ++i) {
+        if(y_histogram[i] > 0) {
+            first_gray_level = i;
+            break;
+        }
+    }
+    if(first_gray_level == -1) { // All black or empty image?
+         for(int i=0; i<img->height; ++i) free(yuv_data[i]);
+         free(yuv_data);
+         return;
+    }
+    cdf_min = y_cdf[first_gray_level];
+
+
+    uint8_t y_eq_map[256];
+    unsigned int total_pixels = (unsigned int)img->width * img->height;
+
+    for (int i = 0; i < 256; ++i) {
+        if (y_cdf[i] == 0) { // No pixels at or below this Y value (should not happen if first_gray_level logic is correct for i >= first_gray_level)
+            y_eq_map[i] = 0; // Or map to i if it's before first_gray_level
+            if (i < first_gray_level) y_eq_map[i] = i; // Untouched
+            else y_eq_map[i] = 0; // Should be covered by cdf_min logic
+        } else {
+            // Denominator (N - cdf_min) can be 0 if all pixels have the same first_gray_level intensity
+            // and N = cdf_min. In this case, map to 0 or 255.
+            float denominator = (float)(total_pixels - cdf_min);
+            if (denominator < 1e-6) { // Effectively zero or N == cdf_min
+                 y_eq_map[i] = (i >= first_gray_level) ? 255 : i; // Stretch if it's the only color
+            } else {
+                float val = roundf(((float)(y_cdf[i] - cdf_min) / denominator) * 255.0f);
+                y_eq_map[i] = (val < 0) ? 0 : ((val > 255) ? 255 : (uint8_t)val);
+            }
+        }
+    }
+     if (total_pixels == cdf_min && first_gray_level != -1) { // All pixels have the same intensity as first_gray_level
+        for(int i=0; i<256; ++i) {
+            y_eq_map[i] = (i == first_gray_level) ? 255 : i; // Map this intensity to 255, others unchanged (or map all to 255)
+                                                            // Or map first_gray_level to 0 if it's the only one.
+                                                            // A single color image should remain single color.
+                                                            // The formula would make it 255.
+        }
+         y_eq_map[first_gray_level] = 255; // Or 0, depending on desired behavior for single-color.
+                                          // Standard behavior is to stretch the range.
+                                          // If cdf[i] == cdf_min, then 0. If cdf[i] == N, then 255.
+                                          // If N == cdf_min, then all pixels are of first_gray_level.
+                                          // cdf[first_gray_level] = cdf_min. So (cdf_min - cdf_min) / (N-cdf_min) = 0.
+                                          // This means the single color maps to 0. This is standard.
+        for(int i=0; i<256; ++i) {
+            if (y_histogram[i] > 0) y_eq_map[i] = 0; // All existing colors map to 0
+        }
+        if (y_histogram[255] == total_pixels) y_eq_map[255] = 255; // If all white, stays white.
+                                                                // If all one color, it maps to 0.
+    }
+
+
+    for (int r = 0; r < img->height; ++r) {
+        for (int c = 0; c < img->width; ++c) {
+            uint8_t original_y_int = (uint8_t)roundf(yuv_data[r][c].y);
+            if (original_y_int > 255) original_y_int = 255;
+
+            float new_Y = y_eq_map[original_y_int];
+            float U = yuv_data[r][c].u;
+            float V = yuv_data[r][c].v;
+
+            float R_new = new_Y + 1.13983f * V;
+            float G_new = new_Y - 0.39465f * U - 0.58060f * V;
+            float B_new = new_Y + 2.03211f * U;
+
+            img->data[r][c].red = (R_new < 0) ? 0 : ((R_new > 255) ? 255 : (uint8_t)roundf(R_new));
+            img->data[r][c].green = (G_new < 0) ? 0 : ((G_new > 255) ? 255 : (uint8_t)roundf(G_new));
+            img->data[r][c].blue = (B_new < 0) ? 0 : ((B_new > 255) ? 255 : (uint8_t)roundf(B_new));
+        }
+    }
+
+    for(int i=0; i<img->height; ++i) free(yuv_data[i]);
+    free(yuv_data);
+}
