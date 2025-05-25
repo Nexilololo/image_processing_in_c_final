@@ -1,240 +1,303 @@
 #include "bmp24.h"
+#include <stdio.h>
 #include <stdlib.h>
-#include <string.h> // For memcpy
-#include <math.h>   // For round, roundf
+#include <string.h>
+#include <math.h>
 
-// --- Allocation and Deallocation Functions ---
+// To help for uint8_t
+static uint8_t float_to_uint8_clamp(float val) {
+    if (val < 0.0f) return 0;
+    if (val > 255.0f) return 255;
+    return (uint8_t)roundf(val);
+}
 
 t_pixel **bmp24_allocateDataPixels(int width, int height) {
-    if (width <= 0 || height <= 0) return NULL;
-    t_pixel **pixels = (t_pixel **)malloc(height * sizeof(t_pixel *));
-    if (!pixels) {
-        perror("Failed to allocate memory for pixel rows");
+    if (width <= 0 || height <= 0) {
+        fprintf(stderr, "Error: Invalid dimensions for pixel data allocation (%d x %d).\n", width, height);
         return NULL;
     }
-    for (int i = 0; i < height; ++i) {
+    t_pixel **pixels = (t_pixel **)malloc(height * sizeof(t_pixel *));
+    if (!pixels) {
+        fprintf(stderr, "Error: Failed to allocate memory for pixel rows.\n");
+        return NULL;
+    }
+    for (int i = 0; i < height; i++) {
         pixels[i] = (t_pixel *)malloc(width * sizeof(t_pixel));
         if (!pixels[i]) {
-            perror("Failed to allocate memory for a pixel row");
-            for (int j = 0; j < i; ++j) free(pixels[j]);
+            fprintf(stderr, "Error: Failed to allocate memory for pixel row %d.\n", i);
+            for (int j = 0; j < i; j++) {
+                free(pixels[j]);
+            }
             free(pixels);
             return NULL;
         }
+        // Initialize pixels to black
+        memset(pixels[i], 0, width * sizeof(t_pixel));
     }
     return pixels;
 }
 
 void bmp24_freeDataPixels(t_pixel **pixels, int height) {
     if (!pixels) return;
-    for (int i = 0; i < height; ++i) {
+    // height is expected to be positive and to match allocation
+    if (height <= 0) return;
+
+    for (int i = 0; i < height; i++) {
         free(pixels[i]);
     }
     free(pixels);
 }
 
-t_bmp24 *bmp24_allocate(int width, int height, int colorDepth) {
-    if (width <= 0 || height <= 0) return NULL;
-    t_bmp24 *img = (t_bmp24 *)malloc(sizeof(t_bmp24));
-    if (!img) {
-        perror("Failed to allocate memory for t_bmp24");
+t_bmp24 *bmp24_allocate(int width, int signed_height, int colorDepth) {
+    int actual_height = (signed_height > 0) ? signed_height : -signed_height;
+
+    if (width <= 0 || actual_height <= 0) {
+        fprintf(stderr, "Error: Invalid dimensions for bmp24 allocation (width: %d, height: %d).\n", width, actual_height);
         return NULL;
     }
-    img->data = bmp24_allocateDataPixels(width, height);
+    t_bmp24 *img = (t_bmp24 *)malloc(sizeof(t_bmp24));
+    if (!img) {
+        fprintf(stderr, "Error: Failed to allocate memory for t_bmp24 structure.\n");
+        return NULL;
+    }
+
+    img->data = bmp24_allocateDataPixels(width, actual_height);
     if (!img->data) {
         free(img);
         return NULL;
     }
+
     img->width = width;
-    img->height = height;
+    img->height = actual_height;
     img->colorDepth = colorDepth;
-    // header and header_info should be initialized by loadImage or manually
+
+    memset(&img->header, 0, sizeof(t_bmp_header));
+    memset(&img->header_info, 0, sizeof(t_bmp_info));
+
+    img->header.type = BMP_TYPE;
+    img->header.offset = sizeof(t_bmp_header) + sizeof(t_bmp_info);
+
+    img->header_info.size = sizeof(t_bmp_info);
+    img->header_info.width = width;
+    img->header_info.height = signed_height;
+    img->header_info.planes = 1;
+    img->header_info.bits = (uint16_t)colorDepth;
+    img->header_info.compression = 0;
+
+    uint32_t row_size_bytes = ((uint32_t)width * (uint32_t)img->header_info.bits + 31u) / 32u * 4u;
+
+    img->header_info.imagesize = row_size_bytes * (uint32_t)actual_height;
+    img->header.size = img->header.offset + img->header_info.imagesize;
+
+    img->header_info.xresolution = 0;
+    img->header_info.yresolution = 0;
+    img->header_info.ncolors = 0;
+    img->header_info.importantcolors = 0;
+
     return img;
 }
 
 void bmp24_free(t_bmp24 *img) {
-    if (img) {
+    if (!img) return;
+    if (img->data) {
         bmp24_freeDataPixels(img->data, img->height);
-        img->data = NULL;
-        free(img);
     }
+    free(img);
 }
 
-// --- Helper Read/Write Functions ---
-
-void file_rawRead(uint32_t position, void *buffer, uint32_t size_elem, size_t n_elem, FILE *file) {
-    if (!file || !buffer) return;
+void file_rawRead (uint32_t position, void * buffer, uint32_t size, size_t n, FILE * file) {
     fseek(file, position, SEEK_SET);
-    fread(buffer, size_elem, n_elem, file);
+    fread(buffer, size, n, file);
 }
 
-void file_rawWrite(uint32_t position, void *buffer, uint32_t size_elem, size_t n_elem, FILE *file) {
-    if (!file || !buffer) return;
+void file_rawWrite (uint32_t position, void * buffer, uint32_t size, size_t n, FILE * file) {
     fseek(file, position, SEEK_SET);
-    fwrite(buffer, size_elem, n_elem, file);
+    fwrite(buffer, size, n, file);
 }
 
-// --- Pixel Data Read/Write ---
-// Assuming padding is 0 for Part 2 as per PDF note: "ensure that the width and height of the image are multiples of 4"
-// If width is a multiple of 4, then width*3 is a multiple of 4, so padding is 0.
+void bmp24_readPixelValue(const t_bmp24 *image, int x, int y, const FILE *file) {
+    (void)image; (void)x; (void)y; (void)file;
+}
 
-void bmp24_readPixelValue(t_bmp24 *image, int x, int y, FILE *file) {
-    if (!image || !image->data || !file || x < 0 || x >= image->width || y < 0 || y >= image->height) return;
-
-    uint32_t row_size_bytes = (uint32_t)image->width * 3; // Assuming no padding
-    uint32_t file_y = image->height - 1 - y;
-    uint32_t pixel_offset = image->header.offset + (file_y * row_size_bytes) + ((uint32_t)x * 3);
-
-    uint8_t bgr[3];
-    file_rawRead(pixel_offset, bgr, sizeof(uint8_t), 3, file);
-
-    image->data[y][x].blue = bgr[0];
-    image->data[y][x].green = bgr[1];
-    image->data[y][x].red = bgr[2];
+void bmp24_writePixelValue(const t_bmp24 *image, int x, int y, const FILE *file) {
+    (void)image; (void)x; (void)y; (void)file;
 }
 
 void bmp24_readPixelData(t_bmp24 *image, FILE *file) {
-    if (!image || !image->data || !file) return;
-    fseek(file, image->header.offset, SEEK_SET);
-
-    // Assuming padding is 0 because width is a multiple of 4 (PDF Part 2 note)
-    // int padding = (4 - (image->width * 3) % 4) % 4;
-    // if (image->width % 4 == 0) padding = 0;
-
-    for (int y_mem = 0; y_mem < image->height; ++y_mem) {
+    if (!image || !image->data || !file) {
+        fprintf(stderr, "Error: NULL image, image data, or file pointer in bmp24_readPixelData.\n");
+        return;
     }
-    // More efficient sequential read:
-    for (int y_file_idx = image->height - 1; y_file_idx >= 0; --y_file_idx) {
-        int y_mem_idx = image->height - 1 - y_file_idx;
-        for (int x_idx = 0; x_idx < image->width; ++x_idx) {
-            uint8_t bgr[3];
-            if (fread(bgr, sizeof(uint8_t), 3, file) != 3) {
-                // Error reading
+
+    if (fseek(file, image->header.offset, SEEK_SET) != 0) {
+        printf("Error: Failed to seek to pixel data offset in bmp24_readPixelData");
+        return;
+    }
+
+    uint32_t bytes_per_pixel = image->header_info.bits / 8;
+    uint32_t row_pitch = ((uint32_t)image->width * bytes_per_pixel + 3u) & ~3u;
+    uint32_t padding_per_row = row_pitch - (uint32_t)image->width * bytes_per_pixel;
+
+    for (int y = image->height - 1; y >= 0; y--) {
+        for (int x = 0; x < image->width; x++) {
+            if (fread(&image->data[y][x].blue, sizeof(uint8_t), 1, file) != 1 ||
+                fread(&image->data[y][x].green, sizeof(uint8_t), 1, file) != 1 ||
+                fread(&image->data[y][x].red, sizeof(uint8_t), 1, file) != 1) {
+                fprintf(stderr, "Error: Failed to read pixel data for (%d, %d).\n", x, y);
+                if(feof(file)) fprintf(stderr, "EOF reached prematurely.\n");
+                if(ferror(file)) printf("File error during read");
                 return;
             }
-            image->data[y_mem_idx][x_idx].blue = bgr[0];
-            image->data[y_mem_idx][x_idx].green = bgr[1];
-            image->data[y_mem_idx][x_idx].red = bgr[2];
         }
-        // if (padding > 0) fseek(file, padding, SEEK_CUR); // Skip padding if any
+        if (padding_per_row > 0) {
+            if (fseek(file, padding_per_row, SEEK_CUR) != 0) {
+                printf("Error: Failed to seek past padding bytes during read");
+                return;
+            }
+        }
     }
-}
-
-
-void bmp24_writePixelValue(t_bmp24 *image, int x, int y, FILE *file) {
-    if (!image || !image->data || !file || x < 0 || x >= image->width || y < 0 || y >= image->height) return;
-
-    uint32_t row_size_bytes = (uint32_t)image->width * 3; // Assuming no padding
-    uint32_t file_y = image->height - 1 - y;
-    uint32_t pixel_offset = image->header.offset + (file_y * row_size_bytes) + ((uint32_t)x * 3);
-
-    uint8_t bgr[3];
-    bgr[0] = image->data[y][x].blue;
-    bgr[1] = image->data[y][x].green;
-    bgr[2] = image->data[y][x].red;
-
-    file_rawWrite(pixel_offset, bgr, sizeof(uint8_t), 3, file);
 }
 
 void bmp24_writePixelData(t_bmp24 *image, FILE *file) {
-    if (!image || !image->data || !file) return;
-    fseek(file, image->header.offset, SEEK_SET);
+    if (!image || !image->data || !file) {
+        fprintf(stderr, "Error: NULL image, image data, or file pointer in bmp24_writePixelData.\n");
+        return;
+    }
 
-    // Assuming padding is 0
-    // int padding = (4 - (image->width * 3) % 4) % 4;
-    // if (image->width % 4 == 0) padding = 0;
+    if (fseek(file, image->header.offset, SEEK_SET) != 0) {
+         printf("Error: Failed to seek to pixel data offset in bmp24_writePixelData");
+        return;
+    }
 
-    for (int y_file_idx = image->height - 1; y_file_idx >= 0; --y_file_idx) {
-        int y_mem_idx = image->height - 1 - y_file_idx;
-        for (int x_idx = 0; x_idx < image->width; ++x_idx) {
-            uint8_t bgr[3];
-            bgr[0] = image->data[y_mem_idx][x_idx].blue;
-            bgr[1] = image->data[y_mem_idx][x_idx].green;
-            bgr[2] = image->data[y_mem_idx][x_idx].red;
-            if (fwrite(bgr, sizeof(uint8_t), 3, file) != 3) {
-                // Error writing
+    uint32_t bytes_per_pixel = image->header_info.bits / 8;
+    uint32_t row_pitch = ((uint32_t)image->width * bytes_per_pixel + 3u) & ~3u;
+    uint32_t padding_per_row = row_pitch - (uint32_t)image->width * bytes_per_pixel;
+    uint8_t pad_byte = 0;
+
+    for (int y = image->height - 1; y >= 0; y--) {
+        for (int x = 0; x < image->width; x++) {
+            if (fwrite(&image->data[y][x].blue, sizeof(uint8_t), 1, file) != 1 ||
+                fwrite(&image->data[y][x].green, sizeof(uint8_t), 1, file) != 1 ||
+                fwrite(&image->data[y][x].red, sizeof(uint8_t), 1, file) != 1) {
+                fprintf(stderr, "Error: Failed to write pixel data for (%d, %d).\n", x, y);
                 return;
             }
         }
-        // if (padding > 0) {
-        //     uint8_t pad_byte = 0;
-        //     for(int p=0; p<padding; ++p) fwrite(&pad_byte, 1, 1, file);
-        // }
+        if (padding_per_row > 0) {
+            for (uint32_t k = 0; k < padding_per_row; k++) {
+                if (fwrite(&pad_byte, sizeof(uint8_t), 1, file) != 1) {
+                    fprintf(stderr, "Error: Failed to write padding byte.\n");
+                    return;
+                }
+            }
+        }
     }
 }
 
-// --- Loading and Saving ---
-
 t_bmp24 *bmp24_loadImage(const char *filename) {
-    FILE *fp = fopen(filename, "rb");
-    if (!fp) {
-        perror("Error opening file for reading");
+    FILE *file = fopen(filename, "rb");
+    if (!file) {
+        printf("Error: Cannot open file for reading");
         return NULL;
     }
 
-    int32_t width_val, height_val;
-    uint16_t bits_val;
+    t_bmp_header bmpHeader;
+    t_bmp_info bmpInfoHeader;
 
-    file_rawRead(BITMAP_WIDTH, &width_val, sizeof(int32_t), 1, fp);
-    file_rawRead(BITMAP_HEIGHT, &height_val, sizeof(int32_t), 1, fp);
-    file_rawRead(BITMAP_DEPTH, &bits_val, sizeof(uint16_t), 1, fp);
+    if (fread(&bmpHeader, sizeof(t_bmp_header), 1, file) != 1) {
+        fprintf(stderr, "Error reading BMP file header.\n"); fclose(file); return NULL;
+    }
+    if (fread(&bmpInfoHeader, sizeof(t_bmp_info), 1, file) != 1) {
+        fprintf(stderr, "Error reading BMP info header.\n"); fclose(file); return NULL;
+    }
 
-    if (bits_val != 24) {
-        fprintf(stderr, "Image is not 24-bit. Bits: %u\n", bits_val);
-        fclose(fp);
+
+    if (bmpHeader.type != BMP_TYPE) {
+        fprintf(stderr, "Error: Not a BMP file. Signature is %04X.\n", bmpHeader.type);
+        fclose(file);
         return NULL;
     }
 
-    t_bmp24 *img = bmp24_allocate(width_val, height_val, bits_val);
+    if (bmpInfoHeader.bits != 24) {
+        fprintf(stderr, "Error: Not a 24-bit BMP file. Bits per pixel: %d.\n", bmpInfoHeader.bits);
+        fclose(file);
+        return NULL;
+    }
+
+    if (bmpInfoHeader.compression != 0) {
+        fprintf(stderr, "Error: Compressed BMP files are not supported. Compression type: %u.\n", bmpInfoHeader.compression);
+        fclose(file);
+        return NULL;
+    }
+
+    if (bmpInfoHeader.width % 4 != 0 || abs(bmpInfoHeader.height) % 4 != 0) {
+         fprintf(stderr, "Warning: Image width (%d) or height (%d) is not a multiple of 4, as expected by problem constraints for simplified padding.\n", bmpInfoHeader.width, abs(bmpInfoHeader.height));
+    }
+
+    t_bmp24 *img = bmp24_allocate(bmpInfoHeader.width, bmpInfoHeader.height, bmpInfoHeader.bits);
     if (!img) {
-        fclose(fp);
+        fclose(file);
         return NULL;
     }
 
-    file_rawRead(BITMAP_MAGIC, &(img->header), sizeof(t_bmp_header), 1, fp);
-    file_rawRead(HEADER_SIZE, &(img->header_info), sizeof(t_bmp_info), 1, fp);
+    img->header = bmpHeader; // Copy loaded main header
+    img->header_info = bmpInfoHeader;
 
-    if (img->header.type != BMP_TYPE) {
-        fprintf(stderr, "Not a BMP file. Type: %x\n", img->header.type);
-        bmp24_free(img);
-        fclose(fp);
-        return NULL;
-    }
-    // Ensure allocated dimensions match header info (should be redundant if read correctly)
-    img->width = img->header_info.width;
-    img->height = img->header_info.height;
-    img->colorDepth = img->header_info.bits;
+    bmp24_readPixelData(img, file);
 
-
-    bmp24_readPixelData(img, fp);
-
-    fclose(fp);
+    fclose(file);
     return img;
 }
 
 void bmp24_saveImage(t_bmp24 *img, const char *filename) {
-    if (!img || !img->data) {
-        fprintf(stderr, "Invalid image data for saving.\n");
-        return;
-    }
-    FILE *fp = fopen(filename, "wb");
-    if (!fp) {
-        perror("Error opening file for writing");
+    if (!img) {
+        fprintf(stderr, "Error: Cannot save NULL image.\n");
         return;
     }
 
-    file_rawWrite(BITMAP_MAGIC, &(img->header), sizeof(t_bmp_header), 1, fp);
-    file_rawWrite(HEADER_SIZE, &(img->header_info), sizeof(t_bmp_info), 1, fp);
-    bmp24_writePixelData(img, fp);
+    FILE *file = fopen(filename, "wb");
+    if (!file) {
+        printf("Error: Cannot open file for writing");
+        return;
+    }
 
-    fclose(fp);
+    // Ensure headers are correctly set before writing
+    img->header.type = BMP_TYPE;
+    img->header.offset = sizeof(t_bmp_header) + sizeof(t_bmp_info);
+
+    img->header_info.size = sizeof(t_bmp_info);
+    img->header_info.width = img->width;
+    img->header_info.height = img->height;
+    img->header_info.planes = 1;
+    img->header_info.bits = (uint16_t)img->colorDepth;
+    img->header_info.compression = 0;
+
+    uint32_t bytes_per_pixel = img->header_info.bits / 8;
+    uint32_t row_pitch = ((uint32_t)img->width * bytes_per_pixel + 3u) & ~3u;
+    img->header_info.imagesize = row_pitch * (uint32_t)img->height;
+    img->header.size = img->header.offset + img->header_info.imagesize;
+
+    img->header_info.xresolution = 0;
+    img->header_info.yresolution = 0;
+    img->header_info.ncolors = 0;
+    img->header_info.importantcolors = 0;
+
+    if (fwrite(&img->header, sizeof(t_bmp_header), 1, file) != 1) {
+        fprintf(stderr, "Error writing BMP file header.\n"); fclose(file); return;
+    }
+    if (fwrite(&img->header_info, sizeof(t_bmp_info), 1, file) != 1) {
+        fprintf(stderr, "Error writing BMP info header.\n"); fclose(file); return;
+    }
+
+    bmp24_writePixelData(img, file);
+
+    fclose(file);
 }
-
-// --- Image Processing ---
 
 void bmp24_negative(t_bmp24 *img) {
     if (!img || !img->data) return;
-    for (int y = 0; y < img->height; ++y) {
-        for (int x = 0; x < img->width; ++x) {
+    for (int y = 0; y < img->height; y++) {
+        for (int x = 0; x < img->width; x++) {
             img->data[y][x].red = 255 - img->data[y][x].red;
             img->data[y][x].green = 255 - img->data[y][x].green;
             img->data[y][x].blue = 255 - img->data[y][x].blue;
@@ -244,12 +307,12 @@ void bmp24_negative(t_bmp24 *img) {
 
 void bmp24_grayscale(t_bmp24 *img) {
     if (!img || !img->data) return;
-    for (int y = 0; y < img->height; ++y) {
-        for (int x = 0; x < img->width; ++x) {
+    for (int y = 0; y < img->height; y++) {
+        for (int x = 0; x < img->width; x++) {
             uint8_t r = img->data[y][x].red;
             uint8_t g = img->data[y][x].green;
             uint8_t b = img->data[y][x].blue;
-            uint8_t gray = (uint8_t)roundf((float)(r + g + b) / 3.0f);
+            uint8_t gray = (uint8_t)roundf(((float)r + (float)g + (float)b) / 3.0f);
             img->data[y][x].red = gray;
             img->data[y][x].green = gray;
             img->data[y][x].blue = gray;
@@ -259,274 +322,132 @@ void bmp24_grayscale(t_bmp24 *img) {
 
 void bmp24_brightness(t_bmp24 *img, int value) {
     if (!img || !img->data) return;
-    for (int y = 0; y < img->height; ++y) {
-        for (int x = 0; x < img->width; ++x) {
+    for (int y = 0; y < img->height; y++) {
+        for (int x = 0; x < img->width; x++) {
             int r = img->data[y][x].red + value;
             int g = img->data[y][x].green + value;
             int b = img->data[y][x].blue + value;
 
-            img->data[y][x].red = (r < 0) ? 0 : ((r > 255) ? 255 : (uint8_t)r);
-            img->data[y][x].green = (g < 0) ? 0 : ((g > 255) ? 255 : (uint8_t)g);
-            img->data[y][x].blue = (b < 0) ? 0 : ((b > 255) ? 255 : (uint8_t)b);
+            img->data[y][x].red = (r < 0) ? 0 : (r > 255) ? 255 : (uint8_t)r;
+            img->data[y][x].green = (g < 0) ? 0 : (g > 255) ? 255 : (uint8_t)g;
+            img->data[y][x].blue = (b < 0) ? 0 : (b > 255) ? 255 : (uint8_t)b;
         }
     }
 }
 
-// --- Convolution Filters ---
-
-t_pixel bmp24_convolution(t_bmp24 *img_read_from, int x_out, int y_out, float **kernel, int kernelSize) {
+t_pixel bmp24_convolution(t_bmp24 *img, int cx, int cy, float **kernel, int kernelSize) {
     t_pixel new_pixel = {0, 0, 0};
-    if (!img_read_from || !img_read_from->data || !kernel || kernelSize % 2 == 0 || kernelSize < 1) {
-        return new_pixel; // Or some error indicator
+    if (!img || !img->data || !kernel) {
+        fprintf(stderr, "Error: NULL pointer passed to bmp24_convolution.\n");
+        if (img && img->data && cx >=0 && cx < img->width && cy >=0 && cy < img->height) return img->data[cy][cx]; // Return original if possible
+        return new_pixel;
     }
 
     float sum_r = 0.0f, sum_g = 0.0f, sum_b = 0.0f;
     int n = kernelSize / 2;
 
-    for (int ky = -n; ky <= n; ++ky) { // Kernel row relative to center
-        for (int kx = -n; kx <= n; ++kx) { // Kernel col relative to center
-            int read_y = y_out - ky; // Image row to read from
-            int read_x = x_out - kx; // Image col to read from
+    for (int i = -n; i <= n; i++) {
+        for (int j = -n; j <= n; j++) {
+            // Image pixel coordinates
+            int pixel_y = cy - i;
+            int pixel_x = cx - j;
 
-            // Boundary check (though caller loop should handle this for output pixel)
-            if (read_y >= 0 && read_y < img_read_from->height && read_x >= 0 && read_x < img_read_from->width) {
-                t_pixel current_pixel = img_read_from->data[read_y][read_x];
-                float kernel_val = kernel[ky + n][kx + n];
-                sum_r += (float)current_pixel.red * kernel_val;
-                sum_g += (float)current_pixel.green * kernel_val;
-                sum_b += (float)current_pixel.blue * kernel_val;
-            }
+            if (pixel_y < 0) pixel_y = 0;
+            if (pixel_y >= img->height) pixel_y = img->height - 1;
+            if (pixel_x < 0) pixel_x = 0;
+            if (pixel_x >= img->width) pixel_x = img->width - 1;
+
+            float kernel_val = kernel[i + n][j + n];
+
+            sum_r += (float)img->data[pixel_y][pixel_x].red * kernel_val;
+            sum_g += (float)img->data[pixel_y][pixel_x].green * kernel_val;
+            sum_b += (float)img->data[pixel_y][pixel_x].blue * kernel_val;
         }
     }
 
-    new_pixel.red = (sum_r < 0) ? 0 : ((sum_r > 255) ? 255 : (uint8_t)roundf(sum_r));
-    new_pixel.green = (sum_g < 0) ? 0 : ((sum_g > 255) ? 255 : (uint8_t)roundf(sum_g));
-    new_pixel.blue = (sum_b < 0) ? 0 : ((sum_b > 255) ? 255 : (uint8_t)roundf(sum_b));
+    new_pixel.red = float_to_uint8_clamp(sum_r);
+    new_pixel.green = float_to_uint8_clamp(sum_g);
+    new_pixel.blue = float_to_uint8_clamp(sum_b);
 
     return new_pixel;
 }
 
-static void apply_filter_generic(t_bmp24 *img, float kernel_values[3][3], int kernelSize) {
-    if (!img || !img->data) return;
-
-    t_pixel **original_data = bmp24_allocateDataPixels(img->width, img->height);
-    if (!original_data) return;
-
-    for (int y = 0; y < img->height; ++y) {
-        memcpy(original_data[y], img->data[y], img->width * sizeof(t_pixel));
-    }
-
-    t_bmp24 temp_read_img_struct;
-    temp_read_img_struct.width = img->width;
-    temp_read_img_struct.height = img->height;
-    temp_read_img_struct.data = original_data;
-    // Other fields of temp_read_img_struct are not strictly needed by bmp24_convolution
-
-    float **kernel = (float **)malloc(kernelSize * sizeof(float *));
-    for (int i = 0; i < kernelSize; ++i) {
-        kernel[i] = (float *)malloc(kernelSize * sizeof(float));
-        for (int j = 0; j < kernelSize; ++j) {
-            kernel[i][j] = kernel_values[i][j];
-        }
-    }
-
-    int n = kernelSize / 2;
-    for (int y = n; y < img->height - n; ++y) {
-        for (int x = n; x < img->width - n; ++x) {
-            img->data[y][x] = bmp24_convolution(&temp_read_img_struct, x, y, kernel, kernelSize);
-        }
-    }
-
-    for (int i = 0; i < kernelSize; ++i) free(kernel[i]);
-    free(kernel);
-    bmp24_freeDataPixels(original_data, img->height);
-}
-
-
-void bmp24_boxBlur(t_bmp24 *img) {
-    float k[3][3] = {
-        {1.0f/9.0f, 1.0f/9.0f, 1.0f/9.0f},
-        {1.0f/9.0f, 1.0f/9.0f, 1.0f/9.0f},
-        {1.0f/9.0f, 1.0f/9.0f, 1.0f/9.0f}
-    };
-    apply_filter_generic(img, k, 3);
-}
-
-void bmp24_gaussianBlur(t_bmp24 *img) {
-    float k[3][3] = {
-        {1.0f/16.0f, 2.0f/16.0f, 1.0f/16.0f},
-        {2.0f/16.0f, 4.0f/16.0f, 2.0f/16.0f},
-        {1.0f/16.0f, 2.0f/16.0f, 1.0f/16.0f}
-    };
-    apply_filter_generic(img, k, 3);
-}
-
-void bmp24_outline(t_bmp24 *img) {
-     float k[3][3] = {
-        {-1.0f, -1.0f, -1.0f},
-        {-1.0f,  8.0f, -1.0f},
-        {-1.0f, -1.0f, -1.0f}
-    };
-    apply_filter_generic(img, k, 3);
-}
-
-void bmp24_emboss(t_bmp24 *img) {
-    float k[3][3] = {
-        {-2.0f, -1.0f,  0.0f},
-        {-1.0f,  1.0f,  1.0f},
-        { 0.0f,  1.0f,  2.0f}
-    };
-    apply_filter_generic(img, k, 3);
-}
-
-void bmp24_sharpen(t_bmp24 *img) {
-    float k[3][3] = {
-        { 0.0f, -1.0f,  0.0f},
-        {-1.0f,  5.0f, -1.0f},
-        { 0.0f, -1.0f,  0.0f}
-    };
-    apply_filter_generic(img, k, 3);
-}
-
-
-// --- Histogram Equalization ---
-typedef struct { float y, u, v; } t_yuv_float;
+typedef struct { float y, u, v; } t_yuv_pixel;
 
 void bmp24_equalize(t_bmp24 *img) {
     if (!img || !img->data) return;
 
-    t_yuv_float **yuv_data = (t_yuv_float **)malloc(img->height * sizeof(t_yuv_float *));
-    if (!yuv_data) return;
-    for(int i=0; i<img->height; ++i) {
-        yuv_data[i] = (t_yuv_float *)malloc(img->width * sizeof(t_yuv_float));
-        if(!yuv_data[i]) {
-            for(int k=0; k<i; ++k) free(yuv_data[k]);
+    int width = img->width;
+    int height = img->height;
+
+    t_yuv_pixel **yuv_data = (t_yuv_pixel **)malloc(height * sizeof(t_yuv_pixel *));
+    if (!yuv_data) { fprintf(stderr, "Error: Failed to allocate YUV data rows.\n"); return; }
+    for (int i = 0; i < height; i++) {
+        yuv_data[i] = (t_yuv_pixel *)malloc(width * sizeof(t_yuv_pixel));
+        if (!yuv_data[i]) {
+            fprintf(stderr, "Error: Failed to allocate YUV data row %d.\n", i);
+            for (int k = 0; k < i; k++) free(yuv_data[k]);
             free(yuv_data);
             return;
         }
     }
 
+    for (int r_idx = 0; r_idx < height; r_idx++) {
+        for (int c_idx = 0; c_idx < width; c_idx++) {
+            float R = (float)img->data[r_idx][c_idx].red;
+            float G = (float)img->data[r_idx][c_idx].green;
+            float B = (float)img->data[r_idx][c_idx].blue;
+            yuv_data[r_idx][c_idx].y = 0.299f * R + 0.587f * G + 0.114f * B;
+            yuv_data[r_idx][c_idx].u = -0.14713f * R - 0.28886f * G + 0.436f * B;
+            yuv_data[r_idx][c_idx].v = 0.615f * R - 0.51499f * G - 0.10001f * B;
+        }
+    }
+
     unsigned int y_histogram[256] = {0};
-
-    for (int r = 0; r < img->height; ++r) {
-        for (int c = 0; c < img->width; ++c) {
-            float R = img->data[r][c].red;
-            float G = img->data[r][c].green;
-            float B = img->data[r][c].blue;
-
-            yuv_data[r][c].y = 0.299f * R + 0.587f * G + 0.114f * B;
-            yuv_data[r][c].u = -0.14713f * R - 0.28886f * G + 0.436f * B;
-            yuv_data[r][c].v = 0.615f * R - 0.51499f * G - 0.10001f * B;
-
-            uint8_t y_int = (uint8_t)roundf(yuv_data[r][c].y);
-            if (y_int > 255) y_int = 255; // Should not happen if R,G,B are 0-255
-            if (y_int < 0) y_int = 0;     // Should not happen
-            y_histogram[y_int]++;
+    for (int r_idx = 0; r_idx < height; r_idx++) {
+        for (int c_idx = 0; c_idx < width; c_idx++) {
+            y_histogram[float_to_uint8_clamp(yuv_data[r_idx][c_idx].y)]++;
         }
     }
 
     unsigned int y_cdf[256] = {0};
     y_cdf[0] = y_histogram[0];
-    for (int i = 1; i < 256; ++i) {
+    for (int i = 1; i < 256; i++) {
         y_cdf[i] = y_cdf[i - 1] + y_histogram[i];
     }
 
     unsigned int cdf_min = 0;
-    for (int i = 0; i < 256; ++i) {
-        if (y_cdf[i] > 0) {
-            cdf_min = y_cdf[i]; // Smallest non-zero CDF value (actually, smallest hist value for cdf_min in formula)
-                                // The PDF formula uses cdf_min from the CDF array.
-                                // Let's find the first non-zero cdf value.
-            break;
-        }
-    }
-    // The PDF formula for hist_eq[i] uses cdf_min as the smallest non-zero value of the *cumulative* histogram.
-    // If all pixels are black, cdf_min could be 0 if we take hist[0].
-    // Let's find the first cdf[k] > 0.
-    // If hist[0] is the only non-zero, cdf_min = hist[0].
-    // The formula is (cdf[i] - cdf_min) / (N - cdf_min) * 255
-    // N = total pixels = img->width * img->height
-    // cdf_min should be the cdf value of the first gray level that has pixels.
-    // If gray level 0 has pixels, cdf_min = cdf[0] = hist[0].
-    // If gray level g is the first with pixels, cdf_min = cdf[g] = hist[g].
-    // The PDF example for 8-bit shows hist_eq[52] = 0, where 52 is the first gray level.
-    // So cdf_min is cdf[first_gray_level_with_pixels].
-
-    int first_gray_level = -1;
-    for(int i=0; i<256; ++i) {
-        if(y_histogram[i] > 0) {
-            first_gray_level = i;
-            break;
-        }
-    }
-    if(first_gray_level == -1) { // All black or empty image?
-         for(int i=0; i<img->height; ++i) free(yuv_data[i]);
-         free(yuv_data);
-         return;
-    }
-    cdf_min = y_cdf[first_gray_level];
-
-
-    uint8_t y_eq_map[256];
-    unsigned int total_pixels = (unsigned int)img->width * img->height;
-
-    for (int i = 0; i < 256; ++i) {
-        if (y_cdf[i] == 0) { // No pixels at or below this Y value (should not happen if first_gray_level logic is correct for i >= first_gray_level)
-            y_eq_map[i] = 0; // Or map to i if it's before first_gray_level
-            if (i < first_gray_level) y_eq_map[i] = i; // Untouched
-            else y_eq_map[i] = 0; // Should be covered by cdf_min logic
-        } else {
-            // Denominator (N - cdf_min) can be 0 if all pixels have the same first_gray_level intensity
-            // and N = cdf_min. In this case, map to 0 or 255.
-            float denominator = (float)(total_pixels - cdf_min);
-            if (denominator < 1e-6) { // Effectively zero or N == cdf_min
-                 y_eq_map[i] = (i >= first_gray_level) ? 255 : i; // Stretch if it's the only color
-            } else {
-                float val = roundf(((float)(y_cdf[i] - cdf_min) / denominator) * 255.0f);
-                y_eq_map[i] = (val < 0) ? 0 : ((val > 255) ? 255 : (uint8_t)val);
-            }
-        }
-    }
-     if (total_pixels == cdf_min && first_gray_level != -1) { // All pixels have the same intensity as first_gray_level
-        for(int i=0; i<256; ++i) {
-            y_eq_map[i] = (i == first_gray_level) ? 255 : i; // Map this intensity to 255, others unchanged (or map all to 255)
-                                                            // Or map first_gray_level to 0 if it's the only one.
-                                                            // A single color image should remain single color.
-                                                            // The formula would make it 255.
-        }
-         y_eq_map[first_gray_level] = 255; // Or 0, depending on desired behavior for single-color.
-                                          // Standard behavior is to stretch the range.
-                                          // If cdf[i] == cdf_min, then 0. If cdf[i] == N, then 255.
-                                          // If N == cdf_min, then all pixels are of first_gray_level.
-                                          // cdf[first_gray_level] = cdf_min. So (cdf_min - cdf_min) / (N-cdf_min) = 0.
-                                          // This means the single color maps to 0. This is standard.
-        for(int i=0; i<256; ++i) {
-            if (y_histogram[i] > 0) y_eq_map[i] = 0; // All existing colors map to 0
-        }
-        if (y_histogram[255] == total_pixels) y_eq_map[255] = 255; // If all white, stays white.
-                                                                // If all one color, it maps to 0.
+    for (int i = 0; i < 256; i++) {
+        if (y_cdf[i] > 0) { cdf_min = y_cdf[i]; break; }
     }
 
+    uint8_t y_equalized_map[256];
+    unsigned long total_pixels = (unsigned long)width * height;
+    float N_minus_cdf_min = (float)(total_pixels - cdf_min);
+    if (N_minus_cdf_min < 1.0f) N_minus_cdf_min = 1.0f; // Avoid division by zero or issues if N=cdf_min
 
-    for (int r = 0; r < img->height; ++r) {
-        for (int c = 0; c < img->width; ++c) {
-            uint8_t original_y_int = (uint8_t)roundf(yuv_data[r][c].y);
-            if (original_y_int > 255) original_y_int = 255;
+    for (int i = 0; i < 256; i++) {
+        float mapped_val = roundf(((float)(y_cdf[i] - cdf_min) / N_minus_cdf_min) * 255.0f);
+        y_equalized_map[i] = float_to_uint8_clamp(mapped_val);
+    }
 
-            float new_Y = y_eq_map[original_y_int];
-            float U = yuv_data[r][c].u;
-            float V = yuv_data[r][c].v;
-
-            float R_new = new_Y + 1.13983f * V;
-            float G_new = new_Y - 0.39465f * U - 0.58060f * V;
-            float B_new = new_Y + 2.03211f * U;
-
-            img->data[r][c].red = (R_new < 0) ? 0 : ((R_new > 255) ? 255 : (uint8_t)roundf(R_new));
-            img->data[r][c].green = (G_new < 0) ? 0 : ((G_new > 255) ? 255 : (uint8_t)roundf(G_new));
-            img->data[r][c].blue = (B_new < 0) ? 0 : ((B_new > 255) ? 255 : (uint8_t)roundf(B_new));
+    for (int r_idx = 0; r_idx < height; r_idx++) {
+        for (int c_idx = 0; c_idx < width; c_idx++) {
+            yuv_data[r_idx][c_idx].y = (float)y_equalized_map[float_to_uint8_clamp(yuv_data[r_idx][c_idx].y)];
         }
     }
 
-    for(int i=0; i<img->height; ++i) free(yuv_data[i]);
+    for (int r_idx = 0; r_idx < height; r_idx++) {
+        for (int c_idx = 0; c_idx < width; c_idx++) {
+            float Y_eq = yuv_data[r_idx][c_idx].y;
+            float U = yuv_data[r_idx][c_idx].u;
+            float V = yuv_data[r_idx][c_idx].v;
+            img->data[r_idx][c_idx].red = float_to_uint8_clamp(Y_eq + 1.13983f * V);
+            img->data[r_idx][c_idx].green = float_to_uint8_clamp(Y_eq - 0.39465f * U - 0.58060f * V);
+            img->data[r_idx][c_idx].blue = float_to_uint8_clamp(Y_eq + 2.03211f * U);
+        }
+    }
+
+    for (int i = 0; i < height; i++) free(yuv_data[i]);
     free(yuv_data);
 }
