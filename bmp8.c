@@ -1,122 +1,146 @@
 #include "bmp8.h"
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h> // For memcpy
-#include <math.h>   // For roundf
+#include <string.h> // For memcpy, calloc
+#include <math.h>   // For round
+
+// Helper function to extract unsigned int from header (little-endian)
+static unsigned int read_uint_le(const unsigned char *buffer, int offset) {
+    return buffer[offset] | (buffer[offset + 1] << 8) | (buffer[offset + 2] << 16) | (buffer[offset + 3] << 24);
+}
+
+// Helper function to extract unsigned short from header (little-endian)
+static unsigned short read_ushort_le(const unsigned char *buffer, int offset) {
+    return buffer[offset] | (buffer[offset + 1] << 8);
+}
 
 t_bmp8 *bmp8_loadImage(const char *filename) {
-    FILE *fp = fopen(filename, "rb");
-    if (!fp) {
-        perror("Error opening file for reading");
+    FILE *file = fopen(filename, "rb");
+    if (!file) {
+        printf("Error opening file for reading");
         return NULL;
     }
 
     t_bmp8 *img = (t_bmp8 *)malloc(sizeof(t_bmp8));
     if (!img) {
-        perror("Failed to allocate memory for t_bmp8");
-        fclose(fp);
+        fprintf(stderr, "Error: Failed to allocate memory for t_bmp8 structure.\n");
+        fclose(file);
         return NULL;
     }
 
-    if (fread(img->header, sizeof(unsigned char), 54, fp) != 54) {
-        fprintf(stderr, "Error reading BMP header.\n");
+    // Read header (54 bytes)
+    if (fread(img->header, sizeof(unsigned char), 54, file) != 54) {
+        fprintf(stderr, "Error: Failed to read BMP header.\n");
         free(img);
-        fclose(fp);
+        fclose(file);
         return NULL;
     }
 
-    img->width = *(unsigned int *)&(img->header[18]);
-    img->height = *(unsigned int *)&(img->header[22]);
-    img->colorDepth = *(unsigned short *)&(img->header[28]);
-    img->dataSize = *(unsigned int *)&(img->header[34]);
-
-    if (img->dataSize == 0) { // Calculate if not present (common for uncompressed)
-        img->dataSize = img->width * img->height; // For 8-bit, 1 byte per pixel
+    // Check BMP signature
+    if (img->header[0] != 'B' || img->header[1] != 'M') {
+        fprintf(stderr, "Error: Not a BMP file (invalid signature).\n");
+        free(img);
+        fclose(file);
+        return NULL;
     }
 
+    // Extract metadata from header
+    img->width = read_uint_le(img->header, 18);
+    img->height = read_uint_le(img->header, 22);
+    img->colorDepth = read_ushort_le(img->header, 28);
+    img->dataSize = read_uint_le(img->header, 34); // biSizeImage
 
     if (img->colorDepth != 8) {
-        fprintf(stderr, "Image is not 8-bit grayscale. Color depth: %u\n", img->colorDepth);
+        fprintf(stderr, "Error: Image is not 8-bit (colorDepth = %u).\n", img->colorDepth);
         free(img);
-        fclose(fp);
+        fclose(file);
         return NULL;
     }
 
-    if (fread(img->colorTable, sizeof(unsigned char), 1024, fp) != 1024) {
-        fprintf(stderr, "Error reading BMP color table.\n");
+    // For 8-bit images, biSizeImage (img->dataSize) can be 0 in the header.
+    // The problem statement for Part 1 implies barbara_gray.bmp has no padding
+    // and dataSize is width * height.
+    if (img->dataSize == 0) {
+        img->dataSize = img->width * img->height;
+    }
+    // A more robust loader would calculate padded row size if dataSize was 0:
+    // unsigned int row_padded_size = ((img->width * img->colorDepth + 31) / 32) * 4;
+    // if (img->dataSize == 0) img->dataSize = row_padded_size * img->height;
+
+
+    // Read color table (256 entries * 4 bytes/entry = 1024 bytes for 8-bit BMP)
+    if (fread(img->colorTable, sizeof(unsigned char), 1024, file) != 1024) {
+        fprintf(stderr, "Error: Failed to read color table.\n");
         free(img);
-        fclose(fp);
+        fclose(file);
         return NULL;
     }
 
+    // Allocate memory for pixel data
     img->data = (unsigned char *)malloc(img->dataSize);
     if (!img->data) {
-        perror("Failed to allocate memory for image data");
+        fprintf(stderr, "Error: Failed to allocate memory for pixel data.\n");
         free(img);
-        fclose(fp);
+        fclose(file);
         return NULL;
     }
 
-    // Seek to the start of pixel data if necessary (bfOffBits)
-    unsigned int pixel_data_offset = *(unsigned int *)&(img->header[10]);
-    fseek(fp, pixel_data_offset, SEEK_SET);
-
-    if (fread(img->data, sizeof(unsigned char), img->dataSize, fp) != img->dataSize) {
-        fprintf(stderr, "Error reading BMP pixel data.\n");
+    // Read pixel data
+    // For Part 1, barbara_gray.bmp has no padding, so dataSize = width * height.
+    // We can read it as a single block.
+    if (fread(img->data, sizeof(unsigned char), img->dataSize, file) != img->dataSize) {
+        fprintf(stderr, "Error: Failed to read pixel data (read %ld, expected %u).\n", ftell(file), img->dataSize);
         free(img->data);
         free(img);
-        fclose(fp);
+        fclose(file);
         return NULL;
     }
 
-    fclose(fp);
+    fclose(file);
     return img;
 }
 
 void bmp8_saveImage(const char *filename, t_bmp8 *img) {
-    if (!img || !img->data) {
-        fprintf(stderr, "Invalid image data for saving.\n");
+    if (!img) {
+        fprintf(stderr, "Error: Cannot save NULL image.\n");
         return;
     }
 
-    FILE *fp = fopen(filename, "wb");
-    if (!fp) {
-        perror("Error opening file for writing");
+    FILE *file = fopen(filename, "wb");
+    if (!file) {
+        printf("Error opening file for writing");
         return;
     }
 
-    if (fwrite(img->header, sizeof(unsigned char), 54, fp) != 54) {
-        fprintf(stderr, "Error writing BMP header.\n");
-        fclose(fp);
+    // Write header
+    if (fwrite(img->header, sizeof(unsigned char), 54, file) != 54) {
+        fprintf(stderr, "Error: Failed to write BMP header.\n");
+        fclose(file);
         return;
     }
 
-    if (fwrite(img->colorTable, sizeof(unsigned char), 1024, fp) != 1024) {
-        fprintf(stderr, "Error writing BMP color table.\n");
-        fclose(fp);
+    // Write color table
+    if (fwrite(img->colorTable, sizeof(unsigned char), 1024, file) != 1024) {
+        fprintf(stderr, "Error: Failed to write color table.\n");
+        fclose(file);
         return;
     }
 
-    // Seek to the start of pixel data if necessary (bfOffBits)
-    // For saving, we assume the header's bfOffBits is correct (54 + 1024)
-    // or that the data immediately follows the color table.
-    // If bfOffBits was different, we'd fseek here.
-    // For simplicity, assuming data follows color table.
-
-    if (fwrite(img->data, sizeof(unsigned char), img->dataSize, fp) != img->dataSize) {
-        fprintf(stderr, "Error writing BMP pixel data.\n");
-        fclose(fp);
+    // Write pixel data
+    // For Part 1, assuming no padding in img->data and dataSize is width*height.
+    if (fwrite(img->data, sizeof(unsigned char), img->dataSize, file) != img->dataSize) {
+        fprintf(stderr, "Error: Failed to write pixel data.\n");
+        fclose(file);
         return;
     }
 
-    fclose(fp);
+    fclose(file);
 }
 
 void bmp8_free(t_bmp8 *img) {
     if (img) {
         if (img->data) {
             free(img->data);
-            img->data = NULL;
         }
         free(img);
     }
@@ -124,7 +148,7 @@ void bmp8_free(t_bmp8 *img) {
 
 void bmp8_printInfo(t_bmp8 *img) {
     if (!img) {
-        printf("Image is NULL.\n");
+        printf("Image Info: NULL image\n");
         return;
     }
     printf("Image Info:\n");
@@ -136,15 +160,15 @@ void bmp8_printInfo(t_bmp8 *img) {
 
 void bmp8_negative(t_bmp8 *img) {
     if (!img || !img->data) return;
-    for (unsigned int i = 0; i < img->dataSize; ++i) {
+    for (unsigned int i = 0; i < img->dataSize; i++) {
         img->data[i] = 255 - img->data[i];
     }
 }
 
 void bmp8_brightness(t_bmp8 *img, int value) {
     if (!img || !img->data) return;
-    for (unsigned int i = 0; i < img->dataSize; ++i) {
-        int new_val = img->data[i] + value;
+    for (unsigned int i = 0; i < img->dataSize; i++) {
+        int new_val = (int)img->data[i] + value;
         if (new_val < 0) new_val = 0;
         if (new_val > 255) new_val = 255;
         img->data[i] = (unsigned char)new_val;
@@ -153,7 +177,7 @@ void bmp8_brightness(t_bmp8 *img, int value) {
 
 void bmp8_threshold(t_bmp8 *img, int threshold_val) {
     if (!img || !img->data) return;
-    for (unsigned int i = 0; i < img->dataSize; ++i) {
+    for (unsigned int i = 0; i < img->dataSize; i++) {
         if (img->data[i] >= threshold_val) {
             img->data[i] = 255;
         } else {
@@ -164,48 +188,59 @@ void bmp8_threshold(t_bmp8 *img, int threshold_val) {
 
 void bmp8_applyFilter(t_bmp8 *img, float **kernel, int kernelSize) {
     if (!img || !img->data || !kernel || kernelSize % 2 == 0 || kernelSize < 1) {
+        fprintf(stderr, "Error: Invalid parameters for bmp8_applyFilter.\n");
         return;
     }
 
-    unsigned char *temp_data = (unsigned char *)malloc(img->dataSize);
-    if (!temp_data) {
-        perror("Failed to allocate memory for temp_data in applyFilter");
+    unsigned char *original_data = (unsigned char *)malloc(img->dataSize);
+    if (!original_data) {
+        fprintf(stderr, "Error: Failed to allocate memory for temporary data in applyFilter.\n");
         return;
     }
-    memcpy(temp_data, img->data, img->dataSize);
+    memcpy(original_data, img->data, img->dataSize);
 
-    int n = kernelSize / 2; // Kernel center offset
+    int n = kernelSize / 2;
+    unsigned int width = img->width;
+    unsigned int height = img->height;
 
-    for (unsigned int y_out = n; y_out < img->height - n; ++y_out) {
-        for (unsigned int x_out = n; x_out < img->width - n; ++x_out) {
+    // Iterate over pixels, skipping borders (as per problem statement for Part 1)
+    // Start from (n, n) and end at (width - 1 - n, height - 1 - n)
+    // For a 3x3 kernel, n=1. Loop y from 1 to height-2, x from 1 to width-2.
+    for (unsigned int y_center = n; y_center < height - n; y_center++) {
+        for (unsigned int x_center = n; x_center < width - n; x_center++) {
             float sum = 0.0f;
-            for (int ky_offset = -n; ky_offset <= n; ++ky_offset) { // Kernel row offset from center
-                for (int kx_offset = -n; kx_offset <= n; ++kx_offset) { // Kernel col offset from center
-                    unsigned int read_y = y_out - ky_offset;
-                    unsigned int read_x = x_out - kx_offset;
+            for (int i_offset = -n; i_offset <= n; i_offset++) { // Kernel row offset from center
+                for (int j_offset = -n; j_offset <= n; j_offset++) { // Kernel col offset from center
+                    // Image pixel coordinates based on convolution formula I_{x-i, y-j}
+                    unsigned int img_y = y_center - i_offset;
+                    unsigned int img_x = x_center - j_offset;
 
-                    sum += (float)temp_data[read_y * img->width + read_x] * kernel[ky_offset + n][kx_offset + n];
+                    // Kernel value K_{i,j} (kernel is 0-indexed, so K_{i,j} -> kernel[i+n][j+n])
+                    float kernel_val = kernel[i_offset + n][j_offset + n];
+
+                    sum += (float)original_data[img_y * width + img_x] * kernel_val;
                 }
             }
-            if (sum < 0.0f) sum = 0.0f;
-            if (sum > 255.0f) sum = 255.0f;
-            img->data[y_out * img->width + x_out] = (unsigned char)roundf(sum);
+            int val = (int)round(sum);
+            if (val < 0) val = 0;
+            if (val > 255) val = 255;
+            img->data[y_center * width + x_center] = (unsigned char)val;
         }
     }
-    free(temp_data);
+    free(original_data);
 }
 
-// Prototypes from Part 3 that belong in bmp8.c
 unsigned int *bmp8_computeHistogram(t_bmp8 *img) {
     if (!img || !img->data) return NULL;
 
+    // Use calloc to initialize histogram to zeros
     unsigned int *hist = (unsigned int *)calloc(256, sizeof(unsigned int));
     if (!hist) {
-        perror("Failed to allocate memory for histogram");
+        fprintf(stderr, "Error: Failed to allocate memory for histogram.\n");
         return NULL;
     }
 
-    for (unsigned int i = 0; i < img->dataSize; ++i) {
+    for (unsigned int i = 0; i < img->dataSize; i++) {
         hist[img->data[i]]++;
     }
     return hist;
@@ -214,23 +249,61 @@ unsigned int *bmp8_computeHistogram(t_bmp8 *img) {
 unsigned int *bmp8_computeCDF(const unsigned int *hist) {
     if (!hist) return NULL;
 
-    unsigned int *cdf = (unsigned int *)calloc(256, sizeof(unsigned int));
-    if (!cdf) {
-        perror("Failed to allocate memory for CDF");
+    unsigned int *hist_eq_map = (unsigned int *)malloc(256 * sizeof(unsigned int));
+    if (!hist_eq_map) {
+        fprintf(stderr, "Error: Failed to allocate memory for CDF/hist_eq_map.\n");
         return NULL;
     }
 
+    unsigned int cdf[256];
+    unsigned int N = 0; // Total number of pixels
+
+    // Calculate CDF and total number of pixels (N)
     cdf[0] = hist[0];
-    for (int i = 1; i < 256; ++i) {
+    N = hist[0];
+    for (int i = 1; i < 256; i++) {
         cdf[i] = cdf[i - 1] + hist[i];
+        N += hist[i];
     }
-    return cdf;
+
+    if (N == 0) { // Empty image or all hist entries are 0
+        for (int i = 0; i < 256; i++) hist_eq_map[i] = i; // No change
+        return hist_eq_map;
+    }
+
+    // Find cdf_min (smallest non-zero CDF value)
+    unsigned int cdf_min_val = N; // Initialize to N
+    for (int i = 0; i < 256; i++) {
+        if (cdf[i] > 0) { // Found the first non-zero CDF value
+            cdf_min_val = cdf[i];
+            break;
+        }
+    }
+    // If all pixels are 0, hist[0]=N, cdf[0]=N, so cdf_min_val = N.
+    // If all pixels are k>0, hist[k]=N, cdf[k]=N (assuming cdf[k-1]=0), so cdf_min_val = N.
+
+    double denominator = (double)N - cdf_min_val;
+
+    for (int i = 0; i < 256; i++) {
+        if (denominator == 0.0) {
+            // This case occurs if all pixels contributing to cdf_min_val up to N
+            // have the same intensity (e.g., monochromatic image).
+            // Map intensity i to i itself.
+            hist_eq_map[i] = i;
+        } else {
+            double val = round(((double)cdf[i] - cdf_min_val) / denominator * 255.0);
+            if (val < 0) val = 0;
+            if (val > 255) val = 255;
+            hist_eq_map[i] = (unsigned int)val;
+        }
+    }
+    return hist_eq_map;
 }
 
 void bmp8_equalize(t_bmp8 *img, const unsigned int *hist_eq_map) {
     if (!img || !img->data || !hist_eq_map) return;
 
-    for (unsigned int i = 0; i < img->dataSize; ++i) {
+    for (unsigned int i = 0; i < img->dataSize; i++) {
         img->data[i] = (unsigned char)hist_eq_map[img->data[i]];
     }
 }
