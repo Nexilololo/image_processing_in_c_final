@@ -4,12 +4,12 @@
 #include <string.h> // For memcpy, calloc
 #include <math.h>   // For round
 
-// Helper function to extract unsigned int from header (little-endian)
+// Helper function to extract unsigned int from header
 static unsigned int read_uint_le(const unsigned char *buffer, int offset) {
     return buffer[offset] | (buffer[offset + 1] << 8) | (buffer[offset + 2] << 16) | (buffer[offset + 3] << 24);
 }
 
-// Helper function to extract unsigned short from header (little-endian)
+// Helper function to extract unsigned short from header
 static unsigned short read_ushort_le(const unsigned char *buffer, int offset) {
     return buffer[offset] | (buffer[offset + 1] << 8);
 }
@@ -28,7 +28,6 @@ t_bmp8 *bmp8_loadImage(const char *filename) {
         return NULL;
     }
 
-    // Read header (54 bytes)
     if (fread(img->header, sizeof(unsigned char), 54, file) != 54) {
         fprintf(stderr, "Error: Failed to read BMP header.\n");
         free(img);
@@ -36,7 +35,6 @@ t_bmp8 *bmp8_loadImage(const char *filename) {
         return NULL;
     }
 
-    // Check BMP signature
     if (img->header[0] != 'B' || img->header[1] != 'M') {
         fprintf(stderr, "Error: Not a BMP file (invalid signature).\n");
         free(img);
@@ -44,11 +42,11 @@ t_bmp8 *bmp8_loadImage(const char *filename) {
         return NULL;
     }
 
-    // Extract metadata from header
+    // Extract data from header
     img->width = read_uint_le(img->header, 18);
     img->height = read_uint_le(img->header, 22);
     img->colorDepth = read_ushort_le(img->header, 28);
-    img->dataSize = read_uint_le(img->header, 34); // biSizeImage
+    img->dataSize = read_uint_le(img->header, 34);
 
     if (img->colorDepth != 8) {
         fprintf(stderr, "Error: Image is not 8-bit (colorDepth = %u).\n", img->colorDepth);
@@ -57,15 +55,9 @@ t_bmp8 *bmp8_loadImage(const char *filename) {
         return NULL;
     }
 
-    // For 8-bit images, biSizeImage (img->dataSize) can be 0 in the header.
-    // The problem statement for Part 1 implies barbara_gray.bmp has no padding
-    // and dataSize is width * height.
     if (img->dataSize == 0) {
         img->dataSize = img->width * img->height;
     }
-    // A more robust loader would calculate padded row size if dataSize was 0:
-    // unsigned int row_padded_size = ((img->width * img->colorDepth + 31) / 32) * 4;
-    // if (img->dataSize == 0) img->dataSize = row_padded_size * img->height;
 
 
     // Read color table (256 entries * 4 bytes/entry = 1024 bytes for 8-bit BMP)
@@ -76,7 +68,6 @@ t_bmp8 *bmp8_loadImage(const char *filename) {
         return NULL;
     }
 
-    // Allocate memory for pixel data
     img->data = (unsigned char *)malloc(img->dataSize);
     if (!img->data) {
         fprintf(stderr, "Error: Failed to allocate memory for pixel data.\n");
@@ -85,9 +76,6 @@ t_bmp8 *bmp8_loadImage(const char *filename) {
         return NULL;
     }
 
-    // Read pixel data
-    // For Part 1, barbara_gray.bmp has no padding, so dataSize = width * height.
-    // We can read it as a single block.
     if (fread(img->data, sizeof(unsigned char), img->dataSize, file) != img->dataSize) {
         fprintf(stderr, "Error: Failed to read pixel data (read %ld, expected %u).\n", ftell(file), img->dataSize);
         free(img->data);
@@ -112,22 +100,18 @@ void bmp8_saveImage(const char *filename, t_bmp8 *img) {
         return;
     }
 
-    // Write header
     if (fwrite(img->header, sizeof(unsigned char), 54, file) != 54) {
         fprintf(stderr, "Error: Failed to write BMP header.\n");
         fclose(file);
         return;
     }
 
-    // Write color table
     if (fwrite(img->colorTable, sizeof(unsigned char), 1024, file) != 1024) {
         fprintf(stderr, "Error: Failed to write color table.\n");
         fclose(file);
         return;
     }
 
-    // Write pixel data
-    // For Part 1, assuming no padding in img->data and dataSize is width*height.
     if (fwrite(img->data, sizeof(unsigned char), img->dataSize, file) != img->dataSize) {
         fprintf(stderr, "Error: Failed to write pixel data.\n");
         fclose(file);
@@ -203,19 +187,15 @@ void bmp8_applyFilter(t_bmp8 *img, float **kernel, int kernelSize) {
     unsigned int width = img->width;
     unsigned int height = img->height;
 
-    // Iterate over pixels, skipping borders (as per problem statement for Part 1)
-    // Start from (n, n) and end at (width - 1 - n, height - 1 - n)
-    // For a 3x3 kernel, n=1. Loop y from 1 to height-2, x from 1 to width-2.
     for (unsigned int y_center = n; y_center < height - n; y_center++) {
         for (unsigned int x_center = n; x_center < width - n; x_center++) {
             float sum = 0.0f;
-            for (int i_offset = -n; i_offset <= n; i_offset++) { // Kernel row offset from center
-                for (int j_offset = -n; j_offset <= n; j_offset++) { // Kernel col offset from center
-                    // Image pixel coordinates based on convolution formula I_{x-i, y-j}
+            for (int i_offset = -n; i_offset <= n; i_offset++) {
+                for (int j_offset = -n; j_offset <= n; j_offset++) {
+                    // Image pixel coordinates based on convolution formula I(x-i, y-j)
                     unsigned int img_y = y_center - i_offset;
                     unsigned int img_x = x_center - j_offset;
 
-                    // Kernel value K_{i,j} (kernel is 0-indexed, so K_{i,j} -> kernel[i+n][j+n])
                     float kernel_val = kernel[i_offset + n][j_offset + n];
 
                     sum += (float)original_data[img_y * width + img_x] * kernel_val;
@@ -258,7 +238,7 @@ unsigned int *bmp8_computeCDF(const unsigned int *hist) {
     unsigned int cdf[256];
     unsigned int N = 0; // Total number of pixels
 
-    // Calculate CDF and total number of pixels (N)
+    // Calculate CDF and total number of pixels
     cdf[0] = hist[0];
     N = hist[0];
     for (int i = 1; i < 256; i++) {
@@ -267,28 +247,23 @@ unsigned int *bmp8_computeCDF(const unsigned int *hist) {
     }
 
     if (N == 0) { // Empty image or all hist entries are 0
-        for (int i = 0; i < 256; i++) hist_eq_map[i] = i; // No change
+        for (int i = 0; i < 256; i++) hist_eq_map[i] = i;
         return hist_eq_map;
     }
 
     // Find cdf_min (smallest non-zero CDF value)
-    unsigned int cdf_min_val = N; // Initialize to N
+    unsigned int cdf_min_val = N;
     for (int i = 0; i < 256; i++) {
-        if (cdf[i] > 0) { // Found the first non-zero CDF value
+        if (cdf[i] > 0) {
             cdf_min_val = cdf[i];
             break;
         }
     }
-    // If all pixels are 0, hist[0]=N, cdf[0]=N, so cdf_min_val = N.
-    // If all pixels are k>0, hist[k]=N, cdf[k]=N (assuming cdf[k-1]=0), so cdf_min_val = N.
 
     double denominator = (double)N - cdf_min_val;
 
     for (int i = 0; i < 256; i++) {
         if (denominator == 0.0) {
-            // This case occurs if all pixels contributing to cdf_min_val up to N
-            // have the same intensity (e.g., monochromatic image).
-            // Map intensity i to i itself.
             hist_eq_map[i] = i;
         } else {
             double val = round(((double)cdf[i] - cdf_min_val) / denominator * 255.0);
