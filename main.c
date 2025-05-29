@@ -98,10 +98,9 @@ void display_filter_menu_bmp24() {
     printf(">>> Your choice: ");
 }
 
-int get_int_input(const char* prompt) {
+int get_int_input() {
     int value;
     char buffer[100];
-    printf("%s", prompt);
     if (fgets(buffer, sizeof(buffer), stdin)) {
         if (sscanf(buffer, "%d", &value) == 1) {
             return value;
@@ -368,7 +367,7 @@ int main() {
     int main_choice;
     do {
         display_main_menu();
-        main_choice = get_int_input("");
+        main_choice = get_int_input();
 
         switch (main_choice) {
             case 1:
